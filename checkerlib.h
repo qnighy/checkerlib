@@ -29,6 +29,8 @@
 
 #if defined(_WIN32) && !defined(__unix__)
 #include <Windows.h>
+#include <io.h>
+#include <fcntl.h>
 
 inline int err(int c,const char *pszAPI)
 {
@@ -36,8 +38,34 @@ inline int err(int c,const char *pszAPI)
   exit(c);
   return c;
 }
+
+inline void DisplayError(const char *pszAPI)
+{
+  LPVOID lpvMessageBuffer;
+  CHAR szPrintBuffer[512];
+  DWORD nCharsWritten;
+
+  FormatMessage(
+      FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_FROM_SYSTEM,
+      NULL, GetLastError(),
+      MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+      (LPTSTR)&lpvMessageBuffer, 0, NULL);
+
+  wsprintf(szPrintBuffer,
+      "ERROR: API    = %s.\n   error code = %d.\n   message    = %s.\n",
+      pszAPI, GetLastError(), (char *)lpvMessageBuffer);
+
+  WriteConsole(GetStdHandle(STD_OUTPUT_HANDLE),szPrintBuffer,
+      lstrlen(szPrintBuffer),&nCharsWritten,NULL);
+
+  LocalFree(lpvMessageBuffer);
+  ExitProcess(GetLastError());
+}
 #else
 #include <err.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <signal.h>
 #endif
 
 ////
@@ -73,6 +101,30 @@ namespace checker {
   const int LLONG_MAX_DECIMAL_L = 7;
   const long long LLONG_MIN_DECIMAL_U = -922337203685477580LL;
   const int LLONG_MIN_DECIMAL_L = -8;
+
+  inline std::string itos(int i) {
+    char c_str[12];
+    c_str[11] = '\0';
+    if(i>0) {
+      for(int j = 10; j >= 0; j--) {
+        c_str[j] = '0'+(i%10);
+        i /= 10;
+        if(i == 0) {
+          return std::string(c_str+j);
+        }
+      }
+    } else if(i<0) {
+      for(int j = 10; j >= 0; j--) {
+        if(i == 0) {
+          c_str[j] = '-';
+          return std::string(c_str+j);
+        }
+        c_str[j] = '0'-(i%10);
+        i /= 10;
+      }
+    }
+    return std::string("0");
+  }
 
   // vsprintf & sprintf for std::string
   inline std::string string_vsprintf(const char *format, va_list ap) {
@@ -114,6 +166,10 @@ namespace checker {
     ParseError(const std::string& what) : std::runtime_error(what) {}
   };
 
+  class ProcessError : public std::runtime_error {
+  public:
+    ProcessError(const std::string& what) : std::runtime_error(what) {}
+  };
 
   class ReaderImpl {
     friend class Reader;
@@ -123,32 +179,37 @@ namespace checker {
     char *filename;
     int lastchar;
     int line,col;
+    char varname[1000]; //TODO
     ReaderImpl(FILE *internal_fp, const char *filename)
       : ref_cnt(0),
         internal_fp(internal_fp),
         filename(new char[strlen(filename)+1]),
         lastchar(-1),line(1),col(0) {
       strcpy(this->filename, filename);
+      strcpy(varname, "<init>");
+    }
+    void dispose() {
+      if(internal_fp) {
+        throw std::logic_error(std::string(filename)+": call readEof() or abortReading() before disposing!");
+      }
     }
     ~ReaderImpl() {
-      if(internal_fp) {
-        throw std::logic_error(string_sprintf("%s: call readEof() or abortReading() before disposing!", filename));
-      }
+      dispose();
       delete[] filename;
     }
     std::string positionDescription() {
-      return string_sprintf("%s(%d,%d): ", filename, line, col);
+      return std::string(filename)+"("+itos(line)+","+itos(col)+","+varname+"): ";
     }
     int readChar() {
       int ret = fgetc(internal_fp);
       if(ferror(internal_fp)) {
-        throw std::runtime_error(string_sprintf("error reading file: %s", strerror(errno)));
+        throw std::runtime_error(std::string("error reading file: ")+strerror(errno));
       }
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(__unix__)
       if(ret=='\r') {
         ret = fgetc(internal_fp);
         if(ferror(internal_fp)) {
-          throw std::runtime_error(string_sprintf("error reading file: %s", strerror(errno)));
+          throw std::runtime_error(std::string("error reading file: ")+strerror(errno));
         }
       }
 #endif
@@ -159,7 +220,7 @@ namespace checker {
     void abortReading() {
       internal_fp = NULL;
     }
-    void abortReadingWithError(std::string str) ATTR_NORETURN {
+    void abortReadingWithError(const std::string& str) ATTR_NORETURN {
       abortReading();
       throw ParseError(positionDescription()+str);
     }
@@ -213,7 +274,11 @@ namespace checker {
       }
     };
 
-    NumData<int> readIntV(const char *format, va_list ap) {
+    void setVarnameV(const char *format, va_list ap) {
+      vsnprintf(varname, 1000, format, ap);
+    }
+
+    NumData<int> readInt() {
       int i;
       int c = readChar();
       if(c == '-') {
@@ -224,10 +289,7 @@ namespace checker {
             c = readChar();
             if('0' <= c && c <= '9') {
               if((i == INT_MIN_DECIMAL_U && - (c - '0') < INT_MIN_DECIMAL_L) || i < INT_MIN_DECIMAL_U) {
-                abortReadingWithError(
-                    "error reading int "+
-                    string_vsprintf(format,ap)+
-                    ": Too large integer constant");
+                abortReadingWithError("error reading int: Too large integer constant");
               }
               i = i*10 - (c - '0');
             } else {
@@ -245,10 +307,7 @@ namespace checker {
           c = readChar();
           if('0' <= c && c <= '9') {
             if((i == INT_MAX_DECIMAL_U && (c - '0') > INT_MAX_DECIMAL_L) || i > INT_MAX_DECIMAL_U) {
-              abortReadingWithError(
-                  "error reading int "+
-                  string_vsprintf(format,ap)+
-                  ": Too large integer constant");
+              abortReadingWithError("error reading int: Too large integer constant");
             }
             i = i*10 + (c - '0');
           } else {
@@ -256,13 +315,10 @@ namespace checker {
           }
         }
       }
-      abortReadingWithError(
-          "error reading int "+
-          string_vsprintf(format,ap)+
-          ": not an integer input");
+      abortReadingWithError("error reading int: not an integer input");
     }
 
-    NumData<long long> readLongV(const char *format, va_list ap) {
+    NumData<long long> readLong() {
       long long i;
       int c = readChar();
       if(c == '-') {
@@ -273,10 +329,7 @@ namespace checker {
             c = readChar();
             if('0' <= c && c <= '9') {
               if((i == LLONG_MIN_DECIMAL_U && - (c - '0') < LLONG_MIN_DECIMAL_L) || i < LLONG_MIN_DECIMAL_U) {
-                abortReadingWithError(
-                    "error reading long long "+
-                    string_vsprintf(format,ap)+
-                    ": Too large integer constant");
+                abortReadingWithError("error reading long long: Too large integer constant");
               }
               i = i*10 - (c - '0');
             } else {
@@ -294,10 +347,7 @@ namespace checker {
           c = readChar();
           if('0' <= c && c <= '9') {
             if((i == LLONG_MAX_DECIMAL_U && (c - '0') > LLONG_MAX_DECIMAL_L) || i > LLONG_MAX_DECIMAL_U) {
-              abortReadingWithError(
-                  "error reading long long "+
-                  string_vsprintf(format,ap)+
-                  ": Too large integer constant");
+              abortReadingWithError("error reading long long: Too large integer constant");
             }
             i = i*10 + (c - '0');
           } else {
@@ -305,10 +355,7 @@ namespace checker {
           }
         }
       }
-      abortReadingWithError(
-          "error reading long long "+
-          string_vsprintf(format,ap)+
-          ": not an integer input");
+      abortReadingWithError("error reading long long: not an integer input");
     }
 
     void readEof() {
@@ -318,11 +365,11 @@ namespace checker {
       }
       if(ferror(internal_fp)) {
         internal_fp = NULL;
-        throw std::runtime_error(string_sprintf("error reading file: %s", strerror(errno)));
+        throw std::runtime_error(std::string("error reading file: ")+strerror(errno));
       }
       if(fclose(internal_fp)==EOF) {
         internal_fp = NULL;
-        throw std::runtime_error(string_sprintf("error closing file: %s", strerror(errno)));
+        throw std::runtime_error(std::string("error reading file: ")+strerror(errno));
       }
       internal_fp = NULL;
     }
@@ -371,27 +418,233 @@ namespace checker {
     ReaderImpl::NumData<int> readInt(const char *format = "<?>", ...) ATTR_PRINTF(2,3) {
       va_list ap;
       va_start(ap, format);
-      ReaderImpl::NumData<int> ret = reader->readIntV(format, ap);
+      reader->setVarnameV(format, ap);
       va_end(ap);
+      ReaderImpl::NumData<int> ret = reader->readInt();
       return ret;
     }
 
     ReaderImpl::NumData<long long> readLong(const char *format = "<?>", ...) ATTR_PRINTF(2,3) {
       va_list ap;
       va_start(ap, format);
-      ReaderImpl::NumData<long long> ret = reader->readLongV(format, ap);
+      reader->setVarnameV(format, ap);
       va_end(ap);
-      return ret;
+      return reader->readLong();
     }
 
+    void dispose() {
+      reader->dispose();
+    }
     void abortReading() {
       reader->abortReading();
     }
-    void abortReadingWithError(std::string message) ATTR_NORETURN {
+    void abortReadingWithError(const std::string& message) ATTR_NORETURN {
       reader->abortReadingWithError(message);
     }
     void readEof() {
       reader->readEof();
+    }
+  };
+
+  ////
+  //// Tools for Reactive
+  ////
+  class ProcessImpl {
+    friend class Process;
+    char *procname;
+    Reader& reader;
+    FILE *write_file;
+    FILE *read_file;
+    pid_t pid;
+    int ref_cnt;
+    ProcessImpl(const char *procname,Reader& reader, FILE *write_file, FILE *read_file,
+        pid_t pid)
+      : procname(new char[strlen(procname)+1]), reader(reader), write_file(write_file),
+        read_file(read_file), pid(pid), ref_cnt(0) {
+      strcpy(this->procname, procname);
+      reader.open(read_file, procname);
+    }
+    void closeProcess() {
+      fclose(write_file);
+      reader.dispose();
+      int status;
+      waitpid(pid, &status, WUNTRACED);
+      if(!WIFEXITED(status)) {
+        throw ProcessError(std::string(procname)+": exited abnormally");
+      }
+      if(WEXITSTATUS(status) != 0) {
+        throw ProcessError(std::string(procname)+": exited with status "+itos(WEXITSTATUS(status)));
+      }
+      write_file = read_file = NULL;
+    }
+    ~ProcessImpl() {
+      if(write_file) {
+        closeProcess();
+      }
+      delete[] procname;
+    }
+    int vprintf(const char *format, va_list ap) {
+      return vfprintf(write_file, format, ap);
+    }
+    int flush() {
+      return fflush(write_file);
+    }
+  };
+  class Process {
+    Reader reader;
+    ProcessImpl *process;
+  public:
+    void execute(const char *file, char *const argv[]) {
+      if(process) throw std::domain_error("Process::execute(const char*,const char*): already executed.");
+      if(!file) throw std::invalid_argument("Process::execute(const char*,const char*): file is NULL.");
+      if(!argv) throw std::invalid_argument("Process::execute(const char*,const char*): argv is NULL.");
+      FILE *read_file;
+      FILE *write_file;
+      int pid;
+      int pipe_c2p[2], pipe_p2c[2];
+
+      signal(SIGPIPE, SIG_IGN);
+      if (pipe(pipe_c2p) < 0 || pipe(pipe_p2c) < 0) {
+        throw std::runtime_error(std::string("error creating pipe: ")+strerror(errno));
+      }
+      if ((pid = fork()) < 0) {
+        throw std::runtime_error(std::string("error forking process: ")+strerror(errno));
+      }
+      if (pid == 0) {
+        close(pipe_p2c[1]); close(pipe_c2p[0]);
+        dup2(pipe_p2c[0], 0); dup2(pipe_c2p[1], 1);
+        close(pipe_p2c[0]); close(pipe_c2p[1]);
+        execvp(file, argv);
+        throw std::runtime_error(std::string("error forking process ")+file+": "+strerror(errno));
+      }
+      close(pipe_p2c[0]); close(pipe_c2p[1]);
+      write_file = fdopen(pipe_p2c[1], "w");
+      read_file = fdopen(pipe_c2p[0], "r");
+      process = new ProcessImpl(file, reader,write_file,read_file,pid);
+      process->ref_cnt++;
+    }
+    void execute(char *const argv[]) {
+      execute(argv[0], argv);
+    }
+    void execute(char *const argv[], int extra_argc, va_list ap) {
+      int argc = 0;
+      for(; argv[argc]; argc++);
+      char **argv2 = new char*[argc+extra_argc+1];
+      for(int i = 0; i < argc; i++) {
+        argv2[i] = argv[i];
+      }
+      for(int i = 0; i < extra_argc; i++) {
+        argv2[argc+i] = va_arg(ap, char*);
+      }
+      argv2[argc+extra_argc] = NULL;
+      execute(argv[0], argv2);
+      delete[] argv2;
+    }
+    void execute(char *const argv[], int extra_argc, ...) {
+      va_list ap;
+      va_start(ap, extra_argc);
+      execute(argv, extra_argc, ap);
+      va_end(ap);
+    }
+    void execute(char *const argv[], char *earg1) {
+      execute(argv, 1, earg1);
+    }
+    void execute(char *const argv[], char *earg1, char *earg2) {
+      execute(argv, 2, earg1, earg2);
+    }
+    void execute(char *const argv[], char *earg1, char *earg2, char *earg3) {
+      execute(argv, 3, earg1, earg2, earg3);
+    }
+    void execute(int argc, va_list ap) {
+      char **argv = new char*[argc+1];
+      for(int i = 0; i < argc; i++) {
+        argv[i] = va_arg(ap, char*);
+      }
+      argv[argc] = NULL;
+      execute(argv[0], argv);
+      delete[] argv;
+    }
+    void execute(int argc, ...) {
+      va_list ap;
+      va_start(ap, argc);
+      execute(argc, ap);
+      va_end(ap);
+    }
+    void execute(char *arg1) {
+      execute(1, arg1);
+    }
+    void execute(char *arg1, char *arg2) {
+      execute(2, arg1, arg2);
+    }
+    void execute(char *arg1, char *arg2, char *arg3) {
+      execute(3, arg1, arg2, arg3);
+    }
+
+    Process() : process(NULL) {}
+    Process& operator=(const Process& that) {
+      if(!--process->ref_cnt) {
+        delete process;
+      }
+      process = that.process;
+      process->ref_cnt++;
+      return *this;
+    }
+    ~Process() {
+      if(!--process->ref_cnt) {
+        delete process;
+      }
+    }
+
+    Process(const char *file, char *const argv[]) : process(NULL) {
+      execute(file, argv);
+    }
+    Process(char *const argv[]) : process(NULL) {
+      execute(argv);
+    }
+    Process(char *const argv[], int extra_argc, ...) : process(NULL) {
+      va_list ap;
+      va_start(ap, extra_argc);
+      execute(argv, extra_argc, ap);
+      va_end(ap);
+    }
+    Process(char *const argv[], char *earg1) : process(NULL) {
+      execute(argv, 1, earg1);
+    }
+    Process(char *const argv[], char *earg1, char *earg2) : process(NULL){
+      execute(argv, 2, earg1, earg2);
+    }
+    Process(char *const argv[], char *earg1, char *earg2, char *earg3) : process(NULL) {
+      execute(argv, 3, earg1, earg2, earg3);
+    }
+    Process(int argc, ...) : process(NULL) {
+      va_list ap;
+      va_start(ap, argc);
+      execute(argc, ap);
+      va_end(ap);
+    }
+    Process(char *arg1) : process(NULL) {
+      execute(1, arg1);
+    }
+    Process(char *arg1, char *arg2) : process(NULL) {
+      execute(2, arg1, arg2);
+    }
+    Process(char *arg1, char *arg2, char *arg3) : process(NULL) {
+      execute(3, arg1, arg2, arg3);
+    }
+    int printf(const char *format, ...) ATTR_PRINTF(2,3) {
+      va_list ap;
+      va_start(ap, format);
+      int ret = process->vprintf(format, ap);
+      va_end(ap);
+      return ret;
+    }
+    int flush() {
+      return process->flush();
+    }
+
+    Reader& in() { return reader; }
+    void closeProcess() {
+      process->closeProcess();
     }
   };
 }
@@ -402,6 +655,8 @@ namespace checker {
 
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
+#undef ATTR_PRINTF
+#undef ATTR_NORETURN
 #endif
 
 #endif /* CHECKERLIB_H */

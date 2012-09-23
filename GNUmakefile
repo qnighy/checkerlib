@@ -2,7 +2,7 @@
 
 CXX = g++
 CXXFLAGS = -O2 -Wall -Wextra -g -std=c++03
-OBJS = sample1 sample2 sample3 sample4 sample4-gen
+OBJS = sample1 sample2 sample3 sample4 sample4-gen sample5a sample5b
 
 .PHONY: all clean test
 
