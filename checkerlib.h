@@ -77,11 +77,13 @@ inline void DisplayError(const char *pszAPI)
 #pragma GCC diagnostic ignored "-Wlong-long"
 
 #define ATTR_PRINTF(x,y) __attribute__ ((format (printf, x, y)))
+#define ATTR_SCANF(x,y) __attribute__ ((format (scanf, x, y)))
 #define ATTR_NORETURN __attribute__((noreturn))
 
 #else
 
 #define ATTR_PRINTF(x,y)
+#define ATTR_SCANF(x,y)
 #define ATTR_NORETURN
 
 #endif
@@ -151,14 +153,14 @@ namespace checker {
     delete[] c_str;
     return str; */
   }
-  inline std::string string_sprintf(const char *format, ...) ATTR_PRINTF(1,2);
+  /*inline std::string string_sprintf(const char *format, ...) ATTR_PRINTF(1,2);
   inline std::string string_sprintf(const char *format, ...) {
     va_list ap;
     va_start(ap, format);
     std::string str = string_vsprintf(format,ap);
     va_end(ap);
     return str;
-  }
+  }*/
 
   // exception
   class ParseError : public std::runtime_error {
@@ -179,12 +181,14 @@ namespace checker {
     char *filename;
     int lastchar;
     int line,col;
-    char varname[1000]; //TODO
+    char varname[1000];
+    std::string *linecache;
     ReaderImpl(FILE *internal_fp, const char *filename)
       : ref_cnt(0),
         internal_fp(internal_fp),
         filename(new char[strlen(filename)+1]),
-        lastchar(-1),line(1),col(0) {
+        lastchar(-1),line(1),col(0),
+        linecache(NULL) {
       strcpy(this->filename, filename);
       strcpy(varname, "<init>");
     }
@@ -195,6 +199,7 @@ namespace checker {
     }
     ~ReaderImpl() {
       dispose();
+      if(linecache) delete linecache;
       delete[] filename;
     }
     std::string positionDescription() {
@@ -213,7 +218,20 @@ namespace checker {
         }
       }
 #endif
-      if(lastchar=='\n'){line++,col=1;}else{col++;}
+      if(linecache) {
+        if(ret=='\n') {
+          fprintf(stderr, "%s<in>: %2d: %s\n", filename, line, linecache->c_str());
+          linecache->clear();
+        } else {
+          linecache->push_back(ret);
+        }
+      }
+      if(lastchar=='\n') {
+        line++;
+        col=1;
+      } else {
+        col++;
+      }
       lastchar = ret;
       return ret;
     }
@@ -373,6 +391,12 @@ namespace checker {
       }
       internal_fp = NULL;
     }
+
+    void enableIODump() {
+      if(!linecache) {
+        linecache = new std::string();
+      }
+    }
   };
   class Reader {
     ReaderImpl *reader;
@@ -444,6 +468,10 @@ namespace checker {
     void readEof() {
       reader->readEof();
     }
+
+    void enableIODump() {
+      reader->enableIODump();
+    }
   };
 
   ////
@@ -457,10 +485,13 @@ namespace checker {
     FILE *read_file;
     pid_t pid;
     int ref_cnt;
+    int line;
+    std::string *linecache;
+    char *prtcache;
     ProcessImpl(const char *procname,Reader& reader, FILE *write_file, FILE *read_file,
         pid_t pid)
       : procname(new char[strlen(procname)+1]), reader(reader), write_file(write_file),
-        read_file(read_file), pid(pid), ref_cnt(0) {
+        read_file(read_file), pid(pid), ref_cnt(0), line(1), linecache(NULL), prtcache(NULL) {
       strcpy(this->procname, procname);
       reader.open(read_file, procname);
     }
@@ -481,13 +512,45 @@ namespace checker {
       if(write_file) {
         closeProcess();
       }
+      if(linecache) {
+        delete linecache;
+        delete[] prtcache;
+      }
       delete[] procname;
     }
+    int vscanf(const char *format, va_list ap) {
+      return vfscanf(read_file, format, ap);
+    }
     int vprintf(const char *format, va_list ap) {
-      return vfprintf(write_file, format, ap);
+      if(linecache) {
+        int retval = vsnprintf(prtcache, 1000, format, ap);
+        if(retval >= 999) {
+          throw std::runtime_error("ProcessImpl::vprintf(const char*,va_list): "
+              "due to va_list restriction, cannot output 1000 or more characters at once "
+              "in IODump mode.");
+        }
+        for(int i = 0; prtcache[i]; i++) {
+          if(prtcache[i]=='\n') {
+            fprintf(stderr, "%s<out>: %2d: %s\n", procname, line++, linecache->c_str());
+            linecache->clear();
+          } else {
+            linecache->push_back(prtcache[i]);
+          }
+        }
+        return fprintf(write_file, "%s", prtcache);
+      } else {
+        return vfprintf(write_file, format, ap);
+      }
     }
     int flush() {
       return fflush(write_file);
+    }
+    void enableIODump() {
+      if(!linecache) {
+        linecache = new std::string();
+        prtcache = new char[1000];
+        reader.enableIODump();
+      }
     }
   };
   class Process {
@@ -515,7 +578,7 @@ namespace checker {
         dup2(pipe_p2c[0], 0); dup2(pipe_c2p[1], 1);
         close(pipe_p2c[0]); close(pipe_c2p[1]);
         execvp(file, argv);
-        throw std::runtime_error(std::string("error forking process ")+file+": "+strerror(errno));
+        throw std::runtime_error(std::string("error executing process ")+file+": "+strerror(errno));
       }
       close(pipe_p2c[0]); close(pipe_c2p[1]);
       write_file = fdopen(pipe_p2c[1], "w");
@@ -631,6 +694,14 @@ namespace checker {
     Process(char *arg1, char *arg2, char *arg3) : process(NULL) {
       execute(3, arg1, arg2, arg3);
     }
+    int scanf(const char *format, ...) ATTR_SCANF(2,3) {
+      // reader.abortReading(); //TODO
+      va_list ap;
+      va_start(ap, format);
+      int ret = process->vscanf(format, ap);
+      va_end(ap);
+      return ret;
+    }
     int printf(const char *format, ...) ATTR_PRINTF(2,3) {
       va_list ap;
       va_start(ap, format);
@@ -646,6 +717,10 @@ namespace checker {
     void closeProcess() {
       process->closeProcess();
     }
+
+    void enableIODump() {
+      process->enableIODump();
+    }
   };
 }
 
@@ -656,6 +731,7 @@ namespace checker {
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
 #undef ATTR_PRINTF
+#undef ATTR_SCANF
 #undef ATTR_NORETURN
 #endif
 

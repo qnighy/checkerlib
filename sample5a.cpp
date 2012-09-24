@@ -8,6 +8,7 @@ const int MAX_X =  1000000000;
 
 int main(int argc, char *argv[]) {
   Reader in(stdin);
+  in.enableIODump();
   const int N = in.readInt("N").range(1,MAX_N).spc();
   const int K = in.readInt("K").range(1,MAX_N).eol();
   static int xs[MAX_N];
@@ -20,6 +21,7 @@ int main(int argc, char *argv[]) {
   bool isCorrect = true;
   try {
     Process p(argv+1);
+    p.enableIODump();
     p.printf("%d %d\n", N, K);
     p.flush();
     int count = 0;
