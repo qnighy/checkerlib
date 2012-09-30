@@ -624,6 +624,54 @@ namespace checker {
       return ret;
     }
   };
+
+  ////
+  //// Algorithm Tools
+  ////
+
+  template<typename T, typename Iterator>
+  void checkUniqueImpl(Iterator begin, Iterator end, const char *varname) {
+    int size = end-begin;
+    std::pair<T,int>* array = new std::pair<T,int>[size];
+    for(int i = 0; i < size; i++) {
+      array[i].first = begin[i];
+      array[i].second = i;
+    }
+    sort(array, array+size);
+    for(int i = 1; i < size; i++) {
+      if(array[i-1].first == array[i].first) {
+        int idx1 = min(array[i-1].second, array[i].second);
+        int idx2 = max(array[i-1].second, array[i].second);
+        delete[] array;
+        throw ParseError(std::string("Not Unique: ")+varname+"["+itos(idx1)+"]"+" == "+varname+"["+itos(idx2)+"]");
+      }
+    }
+    delete[] array;
+  }
+
+  template<typename T>
+  void checkUnique(const T* begin, const T* end, const char *format = "_", ...) {
+    char *varname = new char[1000];
+    va_list ap;
+    va_start(ap, format);
+    snprintf(varname, 1000, format, ap);
+    va_end(ap);
+
+    checkUniqueImpl<T,const T*>(begin, end, varname);
+    delete[] varname;
+  }
+
+  template<typename T>
+  void checkUnique(const std::vector<T>& vec, const char *format = "_", ...) {
+    char *varname = new char[1000];
+    va_list ap;
+    va_start(ap, format);
+    snprintf(varname, 1000, format, ap);
+    va_end(ap);
+
+    checkUniqueImpl<T,std::vector<T>::const_iterator>(vec.begin(), vec.end(), varname);
+    delete[] varname;
+  }
 }
 
 ////
