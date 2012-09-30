@@ -19,7 +19,6 @@ int main() {
     if(result==0) break;
     if(result<0) lo=mid; else hi=mid;
   }
-  // in.readEof();
-  in.abortReading();
+  in.readEof();
   return 0;
 }

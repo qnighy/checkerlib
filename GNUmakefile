@@ -23,6 +23,8 @@ test: all
 	./sample3 < sample3-2.in
 	./sample4 < sample4-1.in
 	./sample4-gen | ./sample4
+	./sample5a ./sample5b < sample5-1.in
+	./sample5a ./sample5c < sample5-1.in
 
 %: %.cpp checkerlib.h
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $<

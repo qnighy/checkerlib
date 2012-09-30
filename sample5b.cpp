@@ -18,7 +18,6 @@ int main() {
     if(result==0) break;
     i++;
   }
-  // in.readEof();
-  in.abortReading();
+  in.readEof();
   return 0;
 }

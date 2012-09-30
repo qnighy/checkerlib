@@ -30,14 +30,15 @@ int main(int argc, char *argv[]) {
         isCorrect = false;
         break;
       }
-      const int guess = p.in().readInt("guess[%d]",count).range(0,N-1).eol();
+      const int guess = p.readInt("guess[%d]",count).range(0,N-1).eol();
       p.printf("%d\n", xs[guess]);
       p.flush();
       if(xs[guess] == 0) {
         break;
       }
     }
-    p.in().readEof();
+    p.closeWriting();
+    p.readEof();
     p.closeProcess();
   } catch(const ParseError& err) {
     fprintf(stderr, "%s\n", err.what());
