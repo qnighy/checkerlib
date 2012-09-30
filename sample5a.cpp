@@ -20,7 +20,8 @@ int main(int argc, char *argv[]) {
   in.readEof();
   bool isCorrect = true;
   try {
-    Process p(argv+1);
+    Process p;
+    p.push(argv+1).execute();
     p.enableIODump();
     p.printf("%d %d\n", N, K);
     p.flush();

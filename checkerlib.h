@@ -83,6 +83,7 @@ inline void DisplayError(const char *pszAPI)
 #include <algorithm>
 #include <exception>
 #include <stdexcept>
+#include <vector>
 #include <string>
 
 namespace checker {
@@ -455,6 +456,8 @@ namespace checker {
   //// Tools for Reactive
   ////
   class Process : public Reader {
+    const char *arg0;
+    std::vector<const char *> args;
     char *procname;
     FILE *write_file;
     FILE *read_file;
@@ -463,6 +466,8 @@ namespace checker {
     std::string *linecache;
     char *prtcache;
     void init() {
+      arg0 = NULL;
+      args.clear();
       procname = NULL;
       write_file = NULL;
       read_file = NULL;
@@ -472,10 +477,10 @@ namespace checker {
       prtcache = NULL;
     }
   public:
-    void execute(const char *file, char *const argv[]) {
-      if(pid) throw std::domain_error("Process::execute(const char*,const char*): already executed.");
-      if(!file) throw std::invalid_argument("Process::execute(const char*,const char*): file is NULL.");
-      if(!argv) throw std::invalid_argument("Process::execute(const char*,const char*): argv is NULL.");
+    void execute() {
+      if(pid) throw std::domain_error("Process::execute(): already executed.");
+      if(args.empty()) throw std::domain_error("Process::execute(): args is empty");
+      const char *file = arg0 ? arg0 : args[0];
       FILE *read_file;
       FILE *write_file;
       int pid;
@@ -492,7 +497,13 @@ namespace checker {
         close(pipe_p2c[1]); close(pipe_c2p[0]);
         dup2(pipe_p2c[0], 0); dup2(pipe_c2p[1], 1);
         close(pipe_p2c[0]); close(pipe_c2p[1]);
-        execvp(file, argv);
+
+        const char **argv = new const char*[args.size()+1];
+        copy(args.begin(), args.end(), argv);
+        argv[args.size()] = NULL;
+
+        execvp(file, (char * const *)argv);
+        delete[] argv;
         throw std::runtime_error(std::string("error executing process ")+file+": "+strerror(errno));
       }
       close(pipe_p2c[0]); close(pipe_c2p[1]);
@@ -503,6 +514,8 @@ namespace checker {
       this->write_file = write_file;
       this->pid = pid;
       this->line = 1;
+      this->arg0 = NULL;
+      this->args.clear();
       strcpy(this->procname, file);
       open(read_file, procname);
     }
@@ -522,6 +535,9 @@ namespace checker {
       write_file = read_file = NULL;
       pid = 0;
     }
+    Process() {
+      init();
+    }
     ~Process() {
       if(pid) {
         closeProcess();
@@ -537,6 +553,7 @@ namespace checker {
       write_file = NULL;
     }
     int vscanf(const char *format, va_list ap) {
+      abortReading();
       return vfscanf(read_file, format, ap);
     }
     int vprintf(const char *format, va_list ap) {
@@ -571,111 +588,28 @@ namespace checker {
       }
     }
 
-    void execute(char *const argv[]) {
-      execute(argv[0], argv);
+    Process& push(const char *argval) {
+      args.push_back(argval);
+      return *this;
     }
-    void execute(char *const argv[], int extra_argc, va_list ap) {
-      int argc = 0;
-      for(; argv[argc]; argc++);
-      char **argv2 = new char*[argc+extra_argc+1];
-      for(int i = 0; i < argc; i++) {
-        argv2[i] = argv[i];
+    Process& push(const char **argval) {
+      for(int i = 0; argval[i]; i++) {
+        args.push_back(argval[i]);
       }
-      for(int i = 0; i < extra_argc; i++) {
-        argv2[argc+i] = va_arg(ap, char*);
+      return *this;
+    }
+    Process& push(char **argval) {
+      for(int i = 0; argval[i]; i++) {
+        args.push_back(argval[i]);
       }
-      argv2[argc+extra_argc] = NULL;
-      execute(argv[0], argv2);
-      delete[] argv2;
+      return *this;
     }
-    void execute(char *const argv[], int extra_argc, ...) {
-      va_list ap;
-      va_start(ap, extra_argc);
-      execute(argv, extra_argc, ap);
-      va_end(ap);
-    }
-    void execute(char *const argv[], char *earg1) {
-      execute(argv, 1, earg1);
-    }
-    void execute(char *const argv[], char *earg1, char *earg2) {
-      execute(argv, 2, earg1, earg2);
-    }
-    void execute(char *const argv[], char *earg1, char *earg2, char *earg3) {
-      execute(argv, 3, earg1, earg2, earg3);
-    }
-    void execute(int argc, va_list ap) {
-      char **argv = new char*[argc+1];
-      for(int i = 0; i < argc; i++) {
-        argv[i] = va_arg(ap, char*);
-      }
-      argv[argc] = NULL;
-      execute(argv[0], argv);
-      delete[] argv;
-    }
-    void execute(int argc, ...) {
-      va_list ap;
-      va_start(ap, argc);
-      execute(argc, ap);
-      va_end(ap);
-    }
-    void execute(char *arg1) {
-      execute(1, arg1);
-    }
-    void execute(char *arg1, char *arg2) {
-      execute(2, arg1, arg2);
-    }
-    void execute(char *arg1, char *arg2, char *arg3) {
-      execute(3, arg1, arg2, arg3);
+    Process& setExecFile(const char *argval) {
+      arg0 = argval;
+      return *this;
     }
 
-    Process(const char *file, char *const argv[]) {
-      init();
-      execute(file, argv);
-    }
-    Process(char *const argv[]){
-      init();
-      execute(argv);
-    }
-    Process(char *const argv[], int extra_argc, ...) {
-      init();
-      va_list ap;
-      va_start(ap, extra_argc);
-      execute(argv, extra_argc, ap);
-      va_end(ap);
-    }
-    Process(char *const argv[], char *earg1) {
-      init();
-      execute(argv, 1, earg1);
-    }
-    Process(char *const argv[], char *earg1, char *earg2) {
-      init();
-      execute(argv, 2, earg1, earg2);
-    }
-    Process(char *const argv[], char *earg1, char *earg2, char *earg3) {
-      init();
-      execute(argv, 3, earg1, earg2, earg3);
-    }
-    Process(int argc, ...) {
-      init();
-      va_list ap;
-      va_start(ap, argc);
-      execute(argc, ap);
-      va_end(ap);
-    }
-    Process(char *arg1) {
-      init();
-      execute(1, arg1);
-    }
-    Process(char *arg1, char *arg2) {
-      init();
-      execute(2, arg1, arg2);
-    }
-    Process(char *arg1, char *arg2, char *arg3) {
-      init();
-      execute(3, arg1, arg2, arg3);
-    }
     int scanf(const char *format, ...) ATTR_SCANF(2,3) {
-      abortReading();
       va_list ap;
       va_start(ap, format);
       int ret = vscanf(format, ap);
